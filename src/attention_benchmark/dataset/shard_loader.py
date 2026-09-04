@@ -82,8 +82,8 @@ class ShardLoader:
             targets.append(tokens[1:])
 
         return (
-            torch.from_numpy(np.stack(input_ids)).to(self.device),
-            torch.from_numpy(np.stack(targets)).to(self.device),
+            torch.from_numpy(np.stack(input_ids)).to(self.device).long(),
+            torch.from_numpy(np.stack(targets)).to(self.device).long(),
         )
 
     def _get_tokens(self, start_idx: int, length: int) -> np.ndarray:

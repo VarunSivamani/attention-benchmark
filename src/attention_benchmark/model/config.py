@@ -48,15 +48,30 @@ class GPTConfig:
     nsa_window_size: int = 512
     nsa_block_counts: int = 16
 
+    curriculum: dict = None  # e.g. {"stages": [2048, 4096, 8192]} or [{"seq_len":...}]
+
     @property
     def head_dim(self) -> int:
         """Dimension per attention head."""
         return self.n_embd // self.n_head
 
     def __post_init__(self) -> None:
-        """Set default tokens_per_stage if not provided."""
+        """Set defaults."""
         if self.tokens_per_stage is None:
             self.tokens_per_stage = [2_000_000_000, 3_000_000_000, 5_000_000_000]
+        if self.curriculum is None:
+            self.curriculum = {"stages": [2048, 4096, 8192]}
+        # Normalize stages to list[int] if given as [{"seq_len":2048}, ...]
+        if isinstance(self.curriculum, dict) and "stages" in self.curriculum:
+            norm = []
+            for s in self.curriculum["stages"]:
+                if isinstance(s, dict):
+                    # YAML gives {"seq_len": 2048}
+                    v = s.get("seq_len", s.get("seqLen", list(s.values())[0] if s else 2048))
+                    norm.append(int(v))
+                else:
+                    norm.append(int(s))
+            self.curriculum["stages"] = norm
 
 
 def load_config_from_yaml(yaml_path: str) -> dict:
@@ -116,6 +131,19 @@ def build_config(
         yaml_value=raw.get("tokens_per_stage"),
     )
 
+    # Curriculum: support {"stages": [2048, ...]} or [{"seq_len":2048}, ...] from YAML
+    curriculum_raw = raw.get("curriculum")
+    if curriculum_raw is None:
+        curriculum = {"stages": [2048, 4096, 8192]}
+    elif isinstance(curriculum_raw, dict):
+        stages = curriculum_raw.get("stages", [2048, 4096, 8192])
+        # keep as-is, GPTConfig.__post_init__ will normalize dict->int
+        curriculum = {"stages": stages}
+    elif isinstance(curriculum_raw, list):
+        curriculum = {"stages": curriculum_raw}
+    else:
+        curriculum = {"stages": [2048, 4096, 8192]}
+
     def _f(v, d):  # float-safe
         try:
             return float(v) if v is not None else d
@@ -147,16 +175,17 @@ def build_config(
         warmup_tokens=_i(training_cfg.get("warmup_tokens", 2_000_000_000), 2_000_000_000),
         gradient_accumulation_steps=_i(training_cfg.get("gradient_accumulation_steps", 1), 1),
         tokens_per_stage=tokens_per_stage,
-        log_interval_steps=logging_cfg.get("log_interval_steps", 50),
-        eval_interval_steps=logging_cfg.get("eval_interval_steps", 500),
-        save_interval_tokens=logging_cfg.get("save_interval_tokens", 1_000_000_000),
+        log_interval_steps=_i(logging_cfg.get("log_interval_steps", 50), 50),
+        eval_interval_steps=_i(logging_cfg.get("eval_interval_steps", 500), 500),
+        save_interval_tokens=_i(logging_cfg.get("save_interval_tokens", 1_000_000_000), 1_000_000_000),
         checkpoint_dir=logging_cfg.get("checkpoint_dir", "runs/flash_gqa"),
         metrics_file=logging_cfg.get("metrics_file", "runs/flash_gqa/metrics.jsonl"),
         eval_file=logging_cfg.get("eval_file", "runs/flash_gqa/eval.jsonl"),
-        num_workers=data_cfg.get("num_workers", 4),
-        prefetch_factor=data_cfg.get("prefetch_factor", 2),
-        nsa_block_size=model_cfg.get("nsa_block_size", 64),
-        nsa_window_size=model_cfg.get("nsa_window_size", 512),
-        nsa_block_counts=model_cfg.get("nsa_block_counts", 16),
+        num_workers=_i(data_cfg.get("num_workers", 4), 4),
+        prefetch_factor=_i(data_cfg.get("prefetch_factor", 2), 2),
+        nsa_block_size=_i(model_cfg.get("nsa_block_size", 64), 64),
+        nsa_window_size=_i(model_cfg.get("nsa_window_size", 512), 512),
+        nsa_block_counts=_i(model_cfg.get("nsa_block_counts", 16), 16),
+        curriculum=curriculum,
     )
     return cfg

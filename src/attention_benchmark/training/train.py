@@ -135,7 +135,9 @@ def train(
     total_tokens_seen = 0
     wall_start = time.time()
 
-    for stage_idx, seq_len in enumerate(config.curriculum["stages"]):
+    # curriculum stages normalized to ints in GPTConfig.__post_init__
+    for stage_idx, stage in enumerate(config.curriculum["stages"]):
+        seq_len = stage["seq_len"] if isinstance(stage, dict) else int(stage)
         stage_tokens_budget = config.tokens_per_stage[stage_idx]
         tokens_in_stage = 0
 
