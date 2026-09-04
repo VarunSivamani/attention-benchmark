@@ -1,8 +1,17 @@
 """
 Simple DDP (Distributed Data Parallel) utilities.
 
-Auto-detects multi-GPU setup via WORLD_SIZE env var.
+Auto-detects multi-GPU via WORLD_SIZE/RANK env vars set by `torchrun` (or `torch.distributed.launch`).
 No FSDP or model parallelism — data parallelism only.
+
+Usage:
+    torchrun --nproc_per_node=2 -m src.attention_benchmark.training.train --config configs/model_flash_gqa.yaml
+    # or debug: configs/model_flash_gqa_debug.yaml
+
+Notes:
+- `wrap_ddp()` uses `broadcast_buffers=False` — Kronecker embeddings have int16 `byte_buffer`/`codebook`
+  buffers that NCCL cannot broadcast (would error `ncclUnhandledCudaError`). Skipping broadcast is safe for this model.
+- `init_distributed()` is a no-op when WORLD_SIZE=1 (single-GPU/CPU local baseline).
 """
 
 import os
@@ -55,13 +64,14 @@ def cleanup_distributed() -> None:
 
 def wrap_ddp(model: nn.Module) -> nn.Module:
     """
-    Wrap model in DDP if distributed.
+    Wrap model in DDP if WORLD_SIZE>1 (torchrun).
 
     Args:
-        model: Model to wrap
+        model: Model to wrap (optionally already `torch.compile`-ed).
 
     Returns:
-        DDP-wrapped model if distributed, else original model
+        DDP-wrapped model if distributed, else original model.
+        Uses `broadcast_buffers=False` to avoid NCCL error on Kronecker int16 buffers.
     """
     if not is_distributed():
         return model
@@ -71,6 +81,7 @@ def wrap_ddp(model: nn.Module) -> nn.Module:
         device_ids=[get_rank()],
         output_device=get_rank(),
         find_unused_parameters=False,
+        broadcast_buffers=False,  # Kronecker has int16 buffers NCCL can't broadcast
     )
 
 

@@ -1,0 +1,46 @@
+# Debug config for Kaggle T4 — small model, single short stage, fast iteration
+# Derived from model_flash_gqa.yaml with reduced sizes for OOM-free training
+
+model:
+  vocab_size: 50257
+  n_layer: 6                         # 12->6
+  n_embd: 512                        # 768->512
+  n_head: 8                          # 12->8 (head_dim 64)
+  n_kv_head: 2                       # 4->2 keep 4:1 GQA
+  block_size: 2048                   # 8192->2048
+  pos_dim: 16
+  attention_type: "flash_gqa"
+  dropout: 0.1
+  bias: false
+  norm_eps: 1e-6
+
+training:
+  batch_size_tokens: 8192             # 4 seqs at 2048; use 16384 for 8 seqs if VRAM allows
+  learning_rate: 6e-4
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  warmup_tokens: 2000000000
+  gradient_accumulation_steps: 1
+
+curriculum:
+  stages:
+    - seq_len: 1024                  # single short stage for debug
+
+# Token budget per stage (overridable via CLI --tokens-per-stage or TOKENS_PER_STAGE env)
+tokens_per_stage: [50000000]         # 50M tokens debug
+
+# Logging & checkpointing
+logging:
+  log_interval_steps: 500              # print every 500 steps (was 50)
+  eval_interval_steps: 500
+  save_interval_tokens: 1000000000
+  checkpoint_dir: "runs/flash_gqa_debug"
+  metrics_file: "runs/flash_gqa_debug/metrics.jsonl"
+  eval_file: "runs/flash_gqa_debug/eval.jsonl"
+
+# Data loading
+data:
+  dataset_repo: null
+  shard_cache_dir: null
+  num_workers: 4
+  prefetch_factor: 2

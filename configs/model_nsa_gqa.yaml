@@ -37,7 +37,7 @@ tokens_per_stage: [2000000000, 3000000000, 5000000000]  # 2B, 3B, 5B (total ~10B
 
 # Logging & checkpointing
 logging:
-  log_interval_steps: 50
+  log_interval_steps: 500            # print every 500 steps
   eval_interval_steps: 500
   save_interval_tokens: 1000000000   # save after each 1B tokens
   checkpoint_dir: "runs/nsa_gqa"

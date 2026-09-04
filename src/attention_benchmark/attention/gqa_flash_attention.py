@@ -119,14 +119,15 @@ class CausalSelfAttentionGQA(nn.Module):
         q = self.rope(q, seq_len)
         k = self.rope(k, seq_len)
 
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            is_causal=True,
-            dropout_p=self.dropout_p if self.training else 0.0,
-            enable_gqa=True,
-        )
+        try:
+            attn_out = F.scaled_dot_product_attention(
+                q, k, v, is_causal=True, dropout_p=self.dropout_p if self.training else 0.0, enable_gqa=True
+            )
+        except TypeError:
+            # torch<2.6 or build without GQA flag
+            attn_out = F.scaled_dot_product_attention(
+                q, k, v, is_causal=True, dropout_p=self.dropout_p if self.training else 0.0
+            )
 
-        attn_out = attn_out.view(batch_size, seq_len, -1)
+        attn_out = attn_out.reshape(batch_size, seq_len, -1)  # fix GQA non-contiguous view
         return self.o_proj(attn_out)

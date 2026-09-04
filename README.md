@@ -215,11 +215,22 @@ Or run the install script included in `scripts/run_nsa_gqa.sh`.
 ### Shard cache not found
 `train.py` currently uses local `./data` shards only (HF Hub download disabled for 2L baseline). For local baseline, ensure shards exist via `prepare_dataset` (default 200k docs). HF Hub download will be re-enabled later via `_maybe_download_from_hf()` in `train.py:18`.
 
-### DDP issues (multi-GPU)
-If training on >1 GPU, `WORLD_SIZE` and `RANK` env vars are set by torchrun. The training script detects and initializes DDP automatically. For manual multi-GPU, use:
+### DDP (multi-GPU) — torchrun
+`train.py` auto-detects DDP via `WORLD_SIZE`/`RANK` env vars set by `torchrun` (`ddp_utils.py:15-32`). No code change needed.
+
 ```bash
+# Single GPU / CPU (local 2L baseline)
+uv run python -m src.attention_benchmark.training.train --config configs/model_flash_gqa.yaml
+uv run python -m src.attention_benchmark.training.train --config configs/model_flash_gqa_debug.yaml  # debug: 6×512, 1024 seq, 50M
+
+# Multi-GPU DDP (Kaggle 2×T4) — also enables AMP + torch.compile + fused AdamW automatically
 torchrun --nproc_per_node=2 -m src.attention_benchmark.training.train --config configs/model_flash_gqa.yaml
+torchrun --nproc_per_node=2 -m src.attention_benchmark.training.train --config configs/model_flash_gqa_debug.yaml
+
+# DDP details: wrap_ddp() uses broadcast_buffers=False (Kronecker int16 buffers would NCCL-fail), init is no-op when WORLD_SIZE=1
 ```
+
+### DDP issues (troubleshooting)
 
 ## License
 
