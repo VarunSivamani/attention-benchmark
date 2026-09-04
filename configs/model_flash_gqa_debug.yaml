@@ -15,12 +15,12 @@ model:
   norm_eps: 1e-6
 
 training:
-  batch_size_tokens: 8192             # 4 seqs at 2048; use 16384 for 8 seqs if VRAM allows
+  batch_size_tokens: 4096             # 8192→4096 (2 seqs at 1024) to avoid T4 OOM; effective 16k via accum
   learning_rate: 6e-4
   weight_decay: 0.1
   max_grad_norm: 1.0
   warmup_tokens: 2000000000
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 4      # 4096*4=16384 effective, keeps throughput without OOM
 
 curriculum:
   stages:
