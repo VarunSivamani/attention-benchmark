@@ -1,0 +1,66 @@
+# Environment & secrets
+.env
+.env.local
+.env*.local
+*.pem
+*.key
+*.pub
+
+# Python virtual environment
+.venv/
+venv/
+env/
+ENV/
+.Python
+
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# Package management
+uv.lock  # Optional: comment out if you want to track lock file
+*.whl
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Development & testing
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Training outputs
+runs/
+checkpoints/
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+
+# Data & caches
+data/
+*.bin
+*.jsonl
+.cache/
+.huggingface/
+wandb/
+lightning_logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+~*

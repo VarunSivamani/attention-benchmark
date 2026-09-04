@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "attention-benchmark"
+version = "0.1.0"
+description = "Compare Flash Attention vs Native Sparse Attention on 124M GPT-style decoder LM with Kronecker embeddings"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.5",
+    "transformers>=4.40",
+    "kronecker-embeddings>=0.1.0",
+    "tiktoken>=0.5.0",
+    "datasets>=2.14.0",
+    "huggingface_hub>=0.19.0",
+    "python-dotenv>=1.0.0",
+    "numpy>=1.23.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.ty]
+python-version = "3.11"
+strict = true
