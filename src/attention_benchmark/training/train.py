@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from dotenv import load_dotenv
 
-from src.attention_benchmark.data.shard_loader import ShardLoader
+from src.attention_benchmark.dataset.shard_loader import ShardLoader
 from src.attention_benchmark.model.config import build_config
 from src.attention_benchmark.model.gpt import GPTModel
 from src.attention_benchmark.training.ddp_utils import (

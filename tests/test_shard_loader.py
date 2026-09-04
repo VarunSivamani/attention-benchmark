@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.attention_benchmark.data.shard_loader import ShardLoader
+from src.attention_benchmark.dataset.shard_loader import ShardLoader
 
 
 @pytest.fixture

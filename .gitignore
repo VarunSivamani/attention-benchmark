@@ -50,8 +50,9 @@ checkpoints/
 *.safetensors
 *.ckpt
 
-# Data & caches
-data/
+# Data & caches (root shard cache)
+# NOTE: use /data/ (root only) so src/attention_benchmark/dataset/ is NOT ignored
+/data/
 *.bin
 *.jsonl
 .cache/
