@@ -58,13 +58,13 @@ uv run python -m src.attention_benchmark.dataset.prepare_dataset \
 
 # Focus: sharding only — HF auth removed for now, upload deferred
 # Features:
-# - Parallel tokenization (3-5x faster) + per-worker cached encoder; Rust fast tokenizer (HF) enabled by default (3-5x), fallback to tiktoken with --no-use-hf-tokenizer
+# - Parallel tokenization (3-5x faster) + per-worker cached tiktoken (default, byte-identical); optional --use-hf-tokenizer for HF fast (Rust, 3-5x)
 # - Auto-detects CPU cores if --num-workers not specified
 # - Resume-safe uploads (skips already-uploaded shards) — upload requires HF_TOKEN/HF_DATASET_REPO, sharding does not
 # - Default split: sample-10BT (~10B tokens); default cap: 200k docs (2L baseline) to cut download/tokenization time
 # - For full 10B run: pass --max-docs 0
 # - Env fallback: --dataset-repo/--hf-token default to HF_DATASET_REPO/HF_TOKEN from .env (only needed for upload)
-# - Faster encoding (default: Rust): HF fast tokenizer enabled by default; disable with --no-use-hf-tokenizer
+# - Encoding (default: tiktoken): byte-identical GPT-2 BPE; optional --use-hf-tokenizer for faster Rust encoding (may cause longer sequences)
 ```
 
 Then set `HF_DATASET_REPO=your_username/fineweb-edu-10bt-gpt2-shards` in `.env` before training (or pass `--dataset-repo` explicitly; `.env` is auto-loaded).
@@ -158,8 +158,8 @@ Generates `comparison_report.html` with side-by-side loss curves, throughput, pe
 - **Flash Attention + GQA**: PyTorch native SDPA with GQA support (PyTorch ≥2.5), runs on CPU/MPS/CUDA.
 - **Native Sparse Attention + GQA**: Triton-based sparse attention (requires CUDA), gated compression + sliding-window fusion.
 - **Grouped Query Attention**: Single query head count / multiple KV head counts, natively expressed as different head dimensions.
-- **Parallel Dataset Preparation**: Multiprocessing tokenization with `prepare_dataset.py` (3-5× faster, Rust HF tokenizer default, per-worker cached), baseline capped at 200k docs (2L, ~150M tokens) via `--max-docs`; slice at load time to avoid full download.
-- **FineWeb-Edu Shards**: GPT-2 BPE (HF fast Rust tokenizer by default, tiktoken fallback), split across uint16 `.bin` files (~100M tokens/shard), uploaded to HF Hub for reproducibility. Full `sample-10BT` = ~10B tokens (~14M docs); baseline = 200k docs (~2-3 shards). HF auth removed for now — sharding local-only, upload later.
+- **Parallel Dataset Preparation**: Multiprocessing tokenization with `prepare_dataset.py` (3-5× faster, tiktoken default per-worker cached), baseline capped at 200k docs (2L, ~150M tokens) via `--max-docs`; slice at load time to avoid full download.
+- **FineWeb-Edu Shards**: GPT-2 BPE (tiktoken byte-identical by default, optional HF fast Rust), split across uint16 `.bin` files (~100M tokens/shard), uploaded to HF Hub for reproducibility. Full `sample-10BT` = ~10B tokens (~14M docs); baseline = 200k docs (~2-3 shards). HF auth removed for now — sharding local-only, upload later.
 - **Staged Curriculum**: Train at 2k context first, then 4k, then 8k — same shards reused at each stage.
 - **Metrics Logging**: JSONL format (step, stage, loss, ppl, tokens/sec, lr, grad_norm, GPU mem, epochs_completed).
 

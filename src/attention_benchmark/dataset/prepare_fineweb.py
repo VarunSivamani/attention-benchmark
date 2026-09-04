@@ -10,8 +10,8 @@ Pass --max-docs 0 or max_docs=None for full split.
 Env fallback: --dataset-repo / --hf-token default to HF_DATASET_REPO / HF_TOKEN
 from .env via load_dotenv() if not passed explicitly.
 
-Faster encoding (default: Rust): HF fast tokenizer via transformers enabled by
-default for 3-5x speedup; fallback to tiktoken. Disable with --no-use-hf-tokenizer.
+Encoding (default: tiktoken): byte-identical GPT-2 BPE; optional HF fast tokenizer
+with --use-hf-tokenizer for Rust speed (can cause longer sequences).
 
 Usage:
     python -m src.attention_benchmark.dataset.prepare_fineweb \
@@ -38,7 +38,7 @@ def prepare_fineweb(
     split: str = "sample-10BT",
     hf_token: str = None,
     max_docs: int = 200_000,
-    use_hf_tokenizer: bool = True,
+    use_hf_tokenizer: bool = False,
 ) -> None:
     """
     Tokenize FineWeb-Edu and save shards.
@@ -52,14 +52,14 @@ def prepare_fineweb(
         hf_token: HF API token. If None, falls back to HF_TOKEN from .env / env
                   (load_dotenv() is called). Required only when uploading.
         max_docs: Max docs to tokenize (default: 200_000 = 2L baseline; 0/None = full).
-        use_hf_tokenizer: If True (default), use HF fast tokenizer (transformers,
-                          Rust, 3-5x faster). False uses tiktoken (byte-identical).
+        use_hf_tokenizer: If True, use HF fast tokenizer (transformers, Rust, 3-5x
+                          faster but may cause longer sequences). Default False keeps
+                          tiktoken (byte-identical, stable).
 
     Env fallback: HF_TOKEN and HF_DATASET_REPO auto-loaded from .env via load_dotenv()
                   if not passed explicitly. Precedence: explicit arg > env var > .env file.
 
-    Faster encoding (default: Rust): HF fast tokenizer enabled by default; falls
-                                     back to tiktoken if transformers not available.
+    Encoding (default: tiktoken): byte-identical GPT-2 BPE; optional HF fast flag.
     """
     # Load .env for fallback (HF_TOKEN, HF_DATASET_REPO) if not passed via CLI
     load_dotenv(override=False)
@@ -92,7 +92,12 @@ def prepare_fineweb(
             from transformers import AutoTokenizer
 
             tokenizer = AutoTokenizer.from_pretrained("gpt2", use_fast=True)
-            tokenizer_has_batch = hasattr(tokenizer, "batch_encode_plus") or hasattr(tokenizer, "__call__")
+            # Fix: default model_max_length=1024 triggers warning for every >1024 doc
+            tokenizer.model_max_length = int(1e9)
+            try:
+                tokenizer.deprecation_warnings = {}
+            except Exception:
+                pass
             is_hf = True
             print("🚀 Using HF fast tokenizer (transformers, Rust) for faster encoding")
         except Exception as e:
@@ -225,9 +230,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--use-hf-tokenizer",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use HF fast tokenizer (transformers, Rust) for faster encoding (default: True, 3-5x). Use --no-use-hf-tokenizer for tiktoken.",
+        action="store_true",
+        help="Use HF fast tokenizer (transformers, Rust) for faster encoding (3-5x, may cause longer sequences). Default: tiktoken.",
     )
     args = parser.parse_args()
 

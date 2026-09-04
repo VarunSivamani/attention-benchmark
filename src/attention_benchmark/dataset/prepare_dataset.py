@@ -24,7 +24,7 @@ Features:
 - Progress tracking every 1280 documents
 - Baseline cap: 200k docs by default; slice at load time to cut download/tokenization time
 - Env fallback: --dataset-repo/--hf-token fall back to HF_DATASET_REPO/HF_TOKEN from .env via load_dotenv()
-- Faster encoding (default: Rust): HF fast tokenizer via transformers (AutoTokenizer, Rust) enabled by default (3-5x); fallback to tiktoken with --no-use-hf-tokenizer
+- Encoding (default: tiktoken): byte-identical GPT-2 BPE via tiktoken (cached per worker); optional --use-hf-tokenizer for HF fast (Rust, 3-5x) if needed
 """
 
 import argparse
@@ -41,14 +41,12 @@ from huggingface_hub import HfApi, create_repo
 
 
 # ---------------------------------------------------------------------------
-# Tokenization — HF fast tokenizer (Rust, default) + tiktoken fallback
+# Tokenization — tiktoken (default, byte-identical) + optional HF fast tokenizer
 # ---------------------------------------------------------------------------
-# Faster library: HuggingFace `tokenizers` (Rust) via transformers
-# `AutoTokenizer.from_pretrained("gpt2", use_fast=True)` is 3-5x faster than
-# tiktoken's per-doc get_encoding() loop because it uses Rust batch parallel
-# inside a single process and avoids re-creating the encoder per doc.
-# Default is HF fast (Rust) for speed; tiktoken kept as fallback via
-# --no-use-hf-tokenizer for byte-identical GPT-2 BPE if needed.
+# tiktoken is Rust-backed and cached per worker; HF fast tokenizer
+# `AutoTokenizer.from_pretrained("gpt2", use_fast=True)` is 3-5x faster
+# but can produce slightly longer sequences (different BPE). Default is
+# tiktoken for stable sequence lengths; use --use-hf-tokenizer to enable HF fast.
 # ---------------------------------------------------------------------------
 _ENCODER = None  # tiktoken.Encoding, initialized per worker
 _HF_TOKENIZER = None  # transformers PreTrainedTokenizerFast
@@ -64,6 +62,13 @@ def _init_worker(tokenizer_name: str = "gpt2", use_hf_fast: bool = False) -> Non
             from transformers import AutoTokenizer
 
             _HF_TOKENIZER = AutoTokenizer.from_pretrained("gpt2", use_fast=True)
+            # Fix: default model_max_length=1024 causes spam warning "Token indices sequence length is longer than..."
+            # for every >1024 tok doc (common in FineWeb). Remove clamp.
+            _HF_TOKENIZER.model_max_length = int(1e9)
+            try:
+                _HF_TOKENIZER.deprecation_warnings = {}
+            except Exception:
+                pass
             _ENCODER = None
         except Exception as e:
             print(f"⚠️  HF fast tokenizer unavailable ({e}), falling back to tiktoken")
@@ -191,7 +196,7 @@ def prepare_fineweb(
     num_workers: int = None,
     batch_size: int = 128,
     max_docs: int = 200_000,
-    use_hf_tokenizer: bool = True,
+    use_hf_tokenizer: bool = False,
 ) -> None:
     """
     Tokenize FineWeb-Edu with parallel processing.
@@ -208,18 +213,18 @@ def prepare_fineweb(
         batch_size: Batch size for tokenization (default: 128)
         max_docs: Max documents to tokenize (default: 200_000 = 2L baseline).
                   Set to 0 or None to use full split. Limits download/time.
-        use_hf_tokenizer: If True (default), use HuggingFace fast tokenizer
-                          (transformers AutoTokenizer, Rust - 3-5x faster).
-                          False uses tiktoken GPT-2 BPE (byte-identical). Falls back
-                          to tiktoken if transformers not available.
+        use_hf_tokenizer: If True, use HuggingFace fast tokenizer (transformers
+                          AutoTokenizer, Rust - 3-5x faster but can cause longer
+                          sequence lengths vs tiktoken). Default False keeps
+                          tiktoken GPT-2 BPE (byte-identical, stable).
 
     Env fallback:
         HF_TOKEN and HF_DATASET_REPO are auto-loaded from .env via load_dotenv()
         if not passed explicitly. Precedence: explicit arg > env var > .env file.
 
-    Faster encoding (default: Rust):
-        HF fast tokenizer is Rust-parallel and faster; tiktoken is cached per
-        worker via Pool(initializer=_init_worker) as fallback.
+    Encoding (default: tiktoken):
+        tiktoken (Rust) cached per worker via Pool(initializer=_init_worker) is
+        default for parity. Use --use-hf-tokenizer for HF fast if needed.
     """
     # Load .env for fallback (HF_TOKEN, HF_DATASET_REPO) if not passed via CLI
     # HF auth is deferred to upload phase — sharding proceeds without token
@@ -269,52 +274,55 @@ def prepare_fineweb(
             streaming=False,
         )
 
-    print(f"Tokenizing {len(dataset):,} documents with {num_workers} workers...")
+    print(f"Tokenizing {len(dataset):,} documents with {num_workers} workers... (single Pool reused)")
     shard_size = 100_000_000
     shard_count = 0
     current_shard = []
     total_tokens = 0
 
-    texts_batch = []
-    for doc_idx, doc in enumerate(dataset):
-        texts_batch.append(doc["text"])
+    with Pool(
+        processes=num_workers,
+        initializer=_init_worker,
+        initargs=("gpt2", use_hf_tokenizer),
+    ) as pool:
+        texts_batch = []
+        for doc_idx, doc in enumerate(dataset):
+            texts_batch.append(doc["text"])
 
-        # Tokenize when batch is full (use cached encoder / optional HF fast)
-        if len(texts_batch) >= batch_size or doc_idx == len(dataset) - 1:
-            token_lists = _tokenize_batch_parallel(
-                texts_batch, num_workers, use_hf_fast=use_hf_tokenizer
+            # Tokenize when batch is full (use cached encoder)
+            if len(texts_batch) >= batch_size or doc_idx == len(dataset) - 1:
+                token_lists = pool.map(_tokenize_doc_cached, texts_batch)
+
+                for tokens in token_lists:
+                    current_shard.extend(tokens)
+                    total_tokens += len(tokens)
+
+                    # Save shard when threshold hit
+                    while len(current_shard) >= shard_size:
+                        _save_shard(
+                            np.array(current_shard[:shard_size], dtype=np.uint16),
+                            output_dir,
+                            shard_count,
+                            "train",
+                        )
+                        current_shard = current_shard[shard_size:]
+                        shard_count += 1
+
+                texts_batch = []
+
+                # Progress update every 1280 docs (128 batch * 10)
+                if (doc_idx + 1) % (batch_size * 10) == 0:
+                    print(f"  Processed {doc_idx + 1:,} docs, {total_tokens:,} tokens")
+
+        # Save remaining tokens (inside Pool context still ok, no more pool.map needed)
+        if current_shard:
+            _save_shard(
+                np.array(current_shard, dtype=np.uint16),
+                output_dir,
+                shard_count,
+                "train",
             )
-
-            for tokens in token_lists:
-                current_shard.extend(tokens)
-                total_tokens += len(tokens)
-
-                # Save shard when threshold hit
-                while len(current_shard) >= shard_size:
-                    _save_shard(
-                        np.array(current_shard[:shard_size], dtype=np.uint16),
-                        output_dir,
-                        shard_count,
-                        "train",
-                    )
-                    current_shard = current_shard[shard_size:]
-                    shard_count += 1
-
-            texts_batch = []
-
-            # Progress update every 1280 docs (128 batch * 10)
-            if (doc_idx + 1) % (batch_size * 10) == 0:
-                print(f"  Processed {doc_idx + 1:,} docs, {total_tokens:,} tokens")
-
-    # Save remaining tokens
-    if current_shard:
-        _save_shard(
-            np.array(current_shard, dtype=np.uint16),
-            output_dir,
-            shard_count,
-            "train",
-        )
-        shard_count += 1
+            shard_count += 1
 
     print(f"\n✅ Saved {shard_count} shards, {total_tokens:,} tokens total")
 
@@ -376,10 +384,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--use-hf-tokenizer",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        action="store_true",
         help="Use HuggingFace fast tokenizer (transformers AutoTokenizer, Rust) for faster encoding "
-        "(default: True, 3-5x faster). Use --no-use-hf-tokenizer for tiktoken GPT-2 BPE (byte-identical).",
+        "(3-5x faster but may change sequence lengths). Default: tiktoken GPT-2 BPE (byte-identical).",
     )
     args = parser.parse_args()
 
