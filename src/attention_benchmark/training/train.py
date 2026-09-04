@@ -2,8 +2,13 @@
 Main training entrypoint with DDP support and curriculum learning.
 
 Usage:
-    python -m src.llmcompare.training.train --config configs/model_flash_gqa.yaml
-    torchrun --nproc_per_node=2 -m src.llmcompare.training.train --config configs/model_nsa_gqa.yaml
+    python -m src.attention_benchmark.training.train --config configs/model_flash_gqa.yaml
+    torchrun --nproc_per_node=2 -m src.attention_benchmark.training.train --config configs/model_nsa_gqa.yaml
+
+Note: HF Hub authentication is intentionally disabled for local 2L baseline.
+      Training uses local shards from ./data via ShardLoader directly.
+      TODO (later): re-enable HF Hub download with snapshot_download + HF_TOKEN
+      when scaling to full 10B or multi-node. See stub _maybe_download_from_hf() below.
 """
 
 import argparse
@@ -32,6 +37,24 @@ from src.attention_benchmark.training.metrics import (
     get_gpu_memory_gb,
     get_grad_norm,
 )
+
+# ---------------------------------------------------------------------------
+# HF Hub auth — disabled for local baseline, keep stub for later
+# ---------------------------------------------------------------------------
+def _maybe_download_from_hf(config) -> None:  # type: ignore[no-untyped-def]
+    """No-op stub. Later: snapshot_download from HF_DATASET_REPO with HF_TOKEN.
+
+    Example (re-enable):
+        from huggingface_hub import snapshot_download
+        if getattr(config, "dataset_repo", None):
+            snapshot_download(
+                repo_id=config.dataset_repo,
+                repo_type="dataset",
+                local_dir="./data",
+                token=os.getenv("HF_TOKEN"),
+            )
+    """
+    return
 
 
 def train_step(
@@ -104,6 +127,8 @@ def train(
     metrics_logger = MetricsLogger(config.metrics_file, config.eval_file)
     throughput = ThroughputTracker()
 
+    # HF auth disabled for now — local shards only. See _maybe_download_from_hf() stub for later.
+    # _maybe_download_from_hf(config)  # TODO: uncomment when re-enabling HF Hub
     data_loader_train = ShardLoader("./data", split="train", device=device)
     data_loader_val = ShardLoader("./data", split="val", device=device)
 
