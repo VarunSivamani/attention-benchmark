@@ -116,24 +116,36 @@ def build_config(
         yaml_value=raw.get("tokens_per_stage"),
     )
 
+    def _f(v, d):  # float-safe
+        try:
+            return float(v) if v is not None else d
+        except Exception:
+            return d
+
+    def _i(v, d):  # int-safe
+        try:
+            return int(float(v)) if v is not None else d
+        except Exception:
+            return d
+
     cfg = GPTConfig(
-        vocab_size=model_cfg.get("vocab_size", 50257),
-        n_layer=model_cfg.get("n_layer", 12),
-        n_embd=model_cfg.get("n_embd", 768),
-        n_head=model_cfg.get("n_head", 12),
-        n_kv_head=model_cfg.get("n_kv_head", 4),
-        block_size=model_cfg.get("block_size", 8192),
-        pos_dim=model_cfg.get("pos_dim", 16),
+        vocab_size=_i(model_cfg.get("vocab_size", 50257), 50257),
+        n_layer=_i(model_cfg.get("n_layer", 12), 12),
+        n_embd=_i(model_cfg.get("n_embd", 768), 768),
+        n_head=_i(model_cfg.get("n_head", 12), 12),
+        n_kv_head=_i(model_cfg.get("n_kv_head", 4), 4),
+        block_size=_i(model_cfg.get("block_size", 8192), 8192),
+        pos_dim=_i(model_cfg.get("pos_dim", 16), 16),
         attention_type=model_cfg.get("attention_type", "flash_gqa"),
-        dropout=model_cfg.get("dropout", 0.1),
+        dropout=_f(model_cfg.get("dropout", 0.1), 0.1),
         bias=model_cfg.get("bias", False),
-        norm_eps=model_cfg.get("norm_eps", 1e-6),
-        batch_size_tokens=training_cfg.get("batch_size_tokens", 524288),
-        learning_rate=training_cfg.get("learning_rate", 6e-4),
-        weight_decay=training_cfg.get("weight_decay", 0.1),
-        max_grad_norm=training_cfg.get("max_grad_norm", 1.0),
-        warmup_tokens=training_cfg.get("warmup_tokens", 2_000_000_000),
-        gradient_accumulation_steps=training_cfg.get("gradient_accumulation_steps", 1),
+        norm_eps=_f(model_cfg.get("norm_eps", 1e-6), 1e-6),
+        batch_size_tokens=_i(training_cfg.get("batch_size_tokens", 524288), 524288),
+        learning_rate=_f(training_cfg.get("learning_rate", 6e-4), 6e-4),
+        weight_decay=_f(training_cfg.get("weight_decay", 0.1), 0.1),
+        max_grad_norm=_f(training_cfg.get("max_grad_norm", 1.0), 1.0),
+        warmup_tokens=_i(training_cfg.get("warmup_tokens", 2_000_000_000), 2_000_000_000),
+        gradient_accumulation_steps=_i(training_cfg.get("gradient_accumulation_steps", 1), 1),
         tokens_per_stage=tokens_per_stage,
         log_interval_steps=logging_cfg.get("log_interval_steps", 50),
         eval_interval_steps=logging_cfg.get("eval_interval_steps", 500),
