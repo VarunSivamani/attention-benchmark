@@ -44,19 +44,29 @@ Before training, prepare FineWeb-Edu shards with parallel tokenization:
 
 ```bash
 # From repo root, run the optimized dataset preparation
+# Default baseline: 200k docs (2 Lakh, ~150-200M tokens, 2-3 shards) for fast CPU iteration
+# HF_TOKEN / HF_DATASET_REPO fall back to .env if not passed via CLI (load_dotenv)
 uv run python -m src.attention_benchmark.dataset.prepare_dataset \
   --dataset-repo your_username/fineweb-edu-10bt-gpt2-shards \
   --split sample-10BT \
-  --num-workers 8
+  --num-workers 8 \
+  --max-docs 200000   # 0 = full 10B split
+
+# Or rely on .env (recommended):
+#   echo "HF_TOKEN=hf_...\nHF_DATASET_REPO=user/repo" > .env
+#   uv run python -m src.attention_benchmark.dataset.prepare_dataset --split sample-10BT
 
 # Features:
 # - Parallel tokenization (3-5x faster on multi-core systems)
 # - Auto-detects CPU cores if --num-workers not specified
 # - Resume-safe uploads (skips already-uploaded shards)
-# - Default split: sample-10BT (~10B tokens)
+# - HF token validated via whoami-v2 (GET https://huggingface.co/api/whoami-v2) before download; 401 => actionable error
+# - Default split: sample-10BT (~10B tokens); default cap: 200k docs (2L baseline) to cut download/tokenization time
+# - For full 10B run: pass --max-docs 0
+# - Env fallback: --dataset-repo/--hf-token default to HF_DATASET_REPO/HF_TOKEN from .env
 ```
 
-Then set `HF_DATASET_REPO=your_username/fineweb-edu-10bt-gpt2-shards` in `.env` before training.
+Then set `HF_DATASET_REPO=your_username/fineweb-edu-10bt-gpt2-shards` in `.env` before training (or pass `--dataset-repo` explicitly; `.env` is auto-loaded).
 
 ## Quick Start
 
@@ -147,8 +157,8 @@ Generates `comparison_report.html` with side-by-side loss curves, throughput, pe
 - **Flash Attention + GQA**: PyTorch native SDPA with GQA support (PyTorch ≥2.5), runs on CPU/MPS/CUDA.
 - **Native Sparse Attention + GQA**: Triton-based sparse attention (requires CUDA), gated compression + sliding-window fusion.
 - **Grouped Query Attention**: Single query head count / multiple KV head counts, natively expressed as different head dimensions.
-- **Parallel Dataset Preparation**: Multiprocessing tokenization with `prepare_dataset.py` (3-5× faster on multi-core systems).
-- **FineWeb-Edu Shards**: ~10B tokens (GPT-2 BPE), split across uint16 `.bin` files, uploaded to HF Hub for reproducibility.
+- **Parallel Dataset Preparation**: Multiprocessing tokenization with `prepare_dataset.py` (3-5× faster on multi-core systems), baseline capped at 200k docs (2L, ~150M tokens) via `--max-docs`; slice at load time to avoid full download.
+- **FineWeb-Edu Shards**: GPT-2 BPE, split across uint16 `.bin` files (~100M tokens/shard), uploaded to HF Hub for reproducibility. Full `sample-10BT` = ~10B tokens (~14M docs); baseline = 200k docs (~2-3 shards).
 - **Staged Curriculum**: Train at 2k context first, then 4k, then 8k — same shards reused at each stage.
 - **Metrics Logging**: JSONL format (step, stage, loss, ppl, tokens/sec, lr, grad_norm, GPU mem, epochs_completed).
 
