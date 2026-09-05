@@ -15,6 +15,7 @@ Notes:
 """
 
 import os
+import warnings
 
 import torch
 import torch.distributed as dist
@@ -76,13 +77,17 @@ def wrap_ddp(model: nn.Module) -> nn.Module:
     if not is_distributed():
         return model
 
-    return nn.parallel.DistributedDataParallel(
-        model,
-        device_ids=[get_rank()],
-        output_device=get_rank(),
-        find_unused_parameters=False,
-        broadcast_buffers=False,  # Kronecker has int16 buffers NCCL can't broadcast
-    )
+    # broadcast_buffers is deprecated (FutureWarning) but required for Kronecker
+    # int16 buffers; suppress warning until init_sync_buffers is available
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        return nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[get_rank()],
+            output_device=get_rank(),
+            find_unused_parameters=False,
+            broadcast_buffers=False,  # Kronecker has int16 buffers NCCL can't broadcast
+        )
 
 
 def get_data_loader_kwargs() -> dict:

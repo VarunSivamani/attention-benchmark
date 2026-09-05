@@ -51,7 +51,7 @@ class ShardLoader:
             mmap = np.memmap(path, dtype=np.uint16, mode="r")
             self.mmaps.append(mmap)
             self.total_tokens += len(mmap)
-        print(f"Loaded {len(self.mmaps)} {self.split} shards, {self.total_tokens:,} tokens total")
+        print(f"Loaded {len(self.mmaps)} {self.split} shards, {self.total_tokens:,} tokens total\n")
 
     def get_batch(
         self,

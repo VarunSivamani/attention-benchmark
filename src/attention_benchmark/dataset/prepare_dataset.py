@@ -29,8 +29,8 @@ Features:
 
 import argparse
 import os
-from pathlib import Path
 from multiprocessing import Pool, cpu_count
+from pathlib import Path
 from typing import List
 
 import numpy as np
@@ -38,7 +38,6 @@ import tiktoken
 from datasets import load_dataset
 from dotenv import load_dotenv
 from huggingface_hub import HfApi, create_repo
-
 
 # ---------------------------------------------------------------------------
 # Tokenization — tiktoken (default, byte-identical) + optional HF fast tokenizer
@@ -188,7 +187,7 @@ def _upload_shards(output_dir: str, dataset_repo: str, hf_token: str) -> None:
     print(f"\n✅ Upload complete: {uploaded_count} new, {skipped_count} skipped")
 
 
-def prepare_fineweb(
+def prepare_dataset(
     output_dir: str = "./data",
     dataset_repo: str = None,
     split: str = "sample-10BT",
@@ -391,7 +390,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        prepare_fineweb(
+        prepare_dataset(
             output_dir=args.output_dir,
             dataset_repo=args.dataset_repo,
             split=args.split,

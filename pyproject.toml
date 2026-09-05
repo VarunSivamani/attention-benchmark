@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "numpy>=1.23.0",
     "pyyaml>=6.0",
+    "wrapt>=1.16",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +40,5 @@ target-version = "py311"
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
 
-[tool.ty]
+[tool.ty.environment]
 python-version = "3.11"
-strict = true

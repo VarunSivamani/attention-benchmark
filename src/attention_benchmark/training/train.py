@@ -25,31 +25,51 @@ Note: HF Hub download disabled for local 2L baseline (`_maybe_download_from_hf` 
 """
 
 import argparse
+import os
 import time
+import warnings
 from pathlib import Path
 from typing import Tuple
+
+# Suppress noisy Kaggle/T4 warnings not actionable (must be before torch import)
+os.environ.setdefault("OMP_NUM_THREADS", "1")  # torchrun default W: OMP_NUM_THREADS
+os.environ.setdefault("TORCHINDUCTOR_MAX_AUTOTUNE_GEMM", "0")  # T4 40 SMs < A100, avoid autotune W
 
 import torch
 import torch.nn as nn
 from dotenv import load_dotenv
 
-from src.attention_benchmark.dataset.shard_loader import ShardLoader
-from src.attention_benchmark.model.config import build_config
-from src.attention_benchmark.model.gpt import GPTModel
-from src.attention_benchmark.training.ddp_utils import (
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch.distributed")
+try:
+    torch._inductor.config.max_autotune_gemm = False  # type: ignore[attr-defined]
+except Exception:
+    pass
+
+from src.attention_benchmark.dataset.shard_loader import ShardLoader  # noqa: E402
+from src.attention_benchmark.model.config import build_config  # noqa: E402
+from src.attention_benchmark.model.gpt import GPTModel  # noqa: E402
+from src.attention_benchmark.training.ddp_utils import (  # noqa: E402
     cleanup_distributed,
+    get_rank,
+    get_world_size,
     init_distributed,
     is_main_process,
     wrap_ddp,
 )
-from src.attention_benchmark.training.metrics import (
+from src.attention_benchmark.training.metrics import (  # noqa: E402
     EvalMetrics,
     MetricsLogger,
     ThroughputTracker,
     TrainMetrics,
+    estimate_tflops,
+    get_gpu_memory_alloc_gb,
     get_gpu_memory_gb,
+    get_gpu_memory_reserved_gb,
     get_grad_norm,
+    get_param_norm,
+    get_scaler_scale,
 )
+
 
 # ---------------------------------------------------------------------------
 # HF Hub auth — disabled for local baseline, keep stub for later
@@ -195,9 +215,20 @@ def train(
     data_loader_train = ShardLoader("./data", split="train", device=device)
     data_loader_val = ShardLoader("./data", split="val", device=device)
 
+    # Pre-compute total trainable params for MFU / TFLOPs (6*N*tok/s)
+    try:
+        num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    except Exception:
+        num_params = 0
+    world_size = get_world_size()
+    rank = get_rank()
+    if is_main_process():
+        print(f"  Params: {num_params:,} | world_size={world_size} | peak_flop heuristic: T4=65/A100=312 TFLOPs")
+
     total_tokens_seen = 0
     prev_epoch = 0
     wall_start = time.time()
+    log_interval_tokens = config.log_interval_steps * config.batch_size_tokens
 
     # curriculum stages normalized to ints in GPTConfig.__post_init__
     for stage_idx, stage in enumerate(config.curriculum["stages"]):
@@ -211,8 +242,14 @@ def train(
         while tokens_in_stage < stage_tokens_budget:
             batch_size_items = max(1, config.batch_size_tokens // seq_len)
 
+            # --- timing: data vs compute ---
+            data_start = time.time()
             input_ids, targets = data_loader_train.get_batch(batch_size_items, seq_len)
+            data_time_ms = (time.time() - data_start) * 1000.0
+
+            step_start = time.time()
             loss = train_step(model, input_ids, targets, optimizer, device, scaler)
+            step_time_ms = (time.time() - step_start) * 1000.0
 
             batch_tokens = input_ids.numel()
             tokens_in_stage += batch_tokens
@@ -220,37 +257,76 @@ def train(
 
             lr = optimizer.param_groups[0]["lr"]
             grad_norm = get_grad_norm(model)
+            param_norm = get_param_norm(model)
             gpu_mem = get_gpu_memory_gb()
+            gpu_reserved = get_gpu_memory_reserved_gb()
+            gpu_alloc = get_gpu_memory_alloc_gb()
+            scaler_scale, scaler_enabled = get_scaler_scale(scaler)
             ppl = torch.exp(torch.tensor(loss)).item()
-            epochs_completed = total_tokens_seen / data_loader_train.total_tokens
+            # guard against empty dataset (total_tokens could be 0 in debug/no shards)
+            try:
+                epochs_completed = total_tokens_seen / data_loader_train.total_tokens if data_loader_train.total_tokens > 0 else 0.0
+            except Exception:
+                epochs_completed = 0.0
+            stage_progress = tokens_in_stage / stage_tokens_budget if stage_tokens_budget > 0 else 0.0
 
             current_time = time.time()
             tokens_per_sec = throughput.update(batch_tokens, current_time)
             wall_clock = current_time - wall_start
+            # throughput returns None for first step (<2 samples); still compute tflops/mfu as 0 then
+            tps_for_mfu = tokens_per_sec if tokens_per_sec is not None else 0.0
+            tflops, mfu = estimate_tflops(tps_for_mfu, num_params, device)
 
-            if is_main_process() and tokens_per_sec is not None:
-                metrics = TrainMetrics(
-                    step=total_tokens_seen // config.batch_size_tokens,
-                    stage=stage_idx + 1,
-                    seq_len=seq_len,
-                    loss=loss,
-                    ppl=ppl,
-                    lr=lr,
-                    grad_norm=grad_norm,
-                    tokens_seen=total_tokens_seen,
-                    tokens_per_sec=tokens_per_sec,
-                    gpu_mem_gb=gpu_mem,
-                    epochs_completed=epochs_completed,
-                    wall_clock_s=wall_clock,
-                )
-
-                if total_tokens_seen % (config.log_interval_steps * config.batch_size_tokens) == 0:
+            # Log every log_interval (e.g. 500 steps) — but also ensure we log at least every stage boundary
+            # Use metrics even when tokens_per_sec is None (first step) to avoid missing early loss
+            should_log = (total_tokens_seen % log_interval_tokens == 0) or (tokens_in_stage >= stage_tokens_budget)
+            # For live console, only print when we have a stable tps window
+            if is_main_process():
+                # Build metrics object every log interval (cheap — only on main)
+                if should_log:
+                    metrics = TrainMetrics(
+                        step=total_tokens_seen // config.batch_size_tokens,
+                        stage=stage_idx + 1,
+                        seq_len=seq_len,
+                        loss=loss,
+                        ppl=ppl,
+                        lr=lr,
+                        grad_norm=grad_norm,
+                        tokens_seen=total_tokens_seen,
+                        tokens_per_sec=tps_for_mfu,
+                        gpu_mem_gb=gpu_mem,
+                        epochs_completed=epochs_completed,
+                        wall_clock_s=wall_clock,
+                        param_norm=param_norm,
+                        scaler_scale=scaler_scale,
+                        scaler_enabled=scaler_enabled,
+                        weight_decay=config.weight_decay,
+                        grad_norm_raw=grad_norm,
+                        tflops=tflops,
+                        mfu=mfu,
+                        step_time_ms=step_time_ms,
+                        data_time_ms=data_time_ms,
+                        peak_tokens_per_sec=throughput.peak,
+                        gpu_mem_reserved_gb=gpu_reserved,
+                        gpu_mem_alloc_gb=gpu_alloc,
+                        tokens_in_stage=tokens_in_stage,
+                        stage_progress=stage_progress,
+                        num_params=num_params,
+                        batch_size_items=batch_size_items,
+                        world_size=world_size,
+                        rank=rank,
+                    )
                     print(
-                        f"  Step {metrics.step}: loss={loss:.4f}, ppl={ppl:.2f}, "
-                        f"tok/s={tokens_per_sec:.0f}, lr={lr:.2e}, "
-                        f"grad_norm={grad_norm:.4f}, epochs={epochs_completed:.2f}"
+                        f"  Step {metrics.step} [stage {metrics.stage} seq={metrics.seq_len}]: "
+                        f"loss={loss:.4f}, ppl={ppl:.2f}, tok/s={tps_for_mfu:.0f} (peak {throughput.peak:.0f}), "
+                        f"tflops={tflops:.1f}, mfu={mfu:.1%}, lr={lr:.2e}, grad={grad_norm:.2f} param={param_norm:.1f}, "
+                        f"step={step_time_ms:.0f}ms data={data_time_ms:.0f}ms, "
+                        f"gpu={gpu_mem:.2f}/{gpu_reserved:.2f}GB, tokens={total_tokens_seen:,}, epochs={epochs_completed:.2f}, wall={wall_clock:.0f}s"
                     )
                     metrics_logger.log_train(metrics)
+                elif tokens_per_sec is not None and total_tokens_seen % (10 * config.batch_size_tokens) == 0:
+                    # lightweight console heartbeat every 10 steps without JSONL spam
+                    pass
 
             # per-epoch checkpoint — save after each full pass over dataset
             if is_main_process():
@@ -265,6 +341,7 @@ def train(
 
         if is_main_process():
             print(f"  [Stage {stage_idx + 1} complete] Running validation...")
+            eval_start = time.time()
             val_loss, val_ppl = eval_step(
                 model,
                 data_loader_val,
@@ -273,6 +350,7 @@ def train(
                 batch_size=batch_size_items,
                 device=device,
             )
+            eval_time_s = time.time() - eval_start
             eval_metrics = EvalMetrics(
                 step=total_tokens_seen // config.batch_size_tokens,
                 stage=stage_idx + 1,
@@ -280,13 +358,25 @@ def train(
                 val_loss=val_loss,
                 val_ppl=val_ppl,
                 wall_clock_s=time.time() - wall_start,
+                tokens_seen=total_tokens_seen,
+                epochs_completed=epochs_completed,
+                gpu_mem_gb=get_gpu_memory_gb(),
+                gpu_mem_reserved_gb=get_gpu_memory_reserved_gb(),
+                eval_time_s=eval_time_s,
+                num_batches=10,
+                batch_size_items=batch_size_items,
             )
-            print(f"    Val loss: {val_loss:.4f}, Val ppl: {val_ppl:.2f}")
+            print(
+                f"    Val [stage {eval_metrics.stage} seq={eval_metrics.seq_len}] "
+                f"loss: {val_loss:.4f}, ppl: {val_ppl:.2f}, eval_time={eval_time_s:.1f}s, wall={eval_metrics.wall_clock_s:.0f}s"
+            )
             metrics_logger.log_eval(eval_metrics)
 
             ckpt_path = Path(config.checkpoint_dir) / f"stage_{stage_idx + 1}.pt"
             ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(model.state_dict(), ckpt_path)
+            # Save unwrapped state for clean reload (mirrors epoch ckpt logic)
+            state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
+            torch.save(state, ckpt_path)
             print(f"    Saved checkpoint: {ckpt_path}")
 
     cleanup_distributed()

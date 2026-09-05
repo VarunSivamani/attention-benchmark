@@ -1,11 +1,13 @@
-# 124M GPT-style LM: Flash Attention vs Native Sparse Attention
+# GPT-style LM: Flash Attention vs Native Sparse Attention
 
 Comparison study of two decoder-only language models using identical architectures and training data, differing only in their attention mechanism:
 
-- **Variant A**: Kronecker embeddings + Flash Attention + Grouped Query Attention (GQA)
+- **Variant A**: Kronecker embeddings + Flash Attention + Grouped Query Attention (GQA) — `Attention type: flash_gqa` (`src/attention_benchmark/attention/gqa_flash_attention.py:135` `sdpa_kernel [FLASH,EFFICIENT,MATH]`)
 - **Variant B**: Kronecker embeddings + Native Sparse Attention (NSA) + GQA
 
 Both trained on FineWeb-Edu with a staged context-length curriculum (2k → 4k → 8k tokens) and logged for side-by-side performance comparison.
+
+**Model sizes:** Full `124M` (`145,571,328` params `12×768 n_head12 n_kv4 block8192` `configs/model_flash_gqa.yaml`) | Debug `50.6M` (`50,641,920` trainable: Embedding `2,097,152` + Blocks `22,812,672` + LM Head `25,731,584` `6×512 n_head8 n_kv2 block2048/8192` `configs/model_flash_gqa_debug.yaml`) — `T4 14.5GB` uses debug `AMP float16` `torch.compile`.
 
 ## Setup
 
@@ -98,6 +100,46 @@ Both scripts:
 - Save checkpoints to `runs/<variant>/ckpt_*.pt`
 - Print per-stage and per-step stats to stdout
 
+#### 2k → 4k → 8k Curriculum — Detailed Steps (Kaggle 2×T4 example)
+Full 124M (`12×768`, `block_size 8192`) needs `A100`; for `T4` use debug `50M` (`6×512`, `block_size 8192`) — same curriculum, fits `14.5GB` with `AMP float16` + `torch.compile` + `SDPA flash/mem_efficient` (`src/attention_benchmark/attention/gqa_flash_attention.py:15` prefers `FLASH->EFFICIENT`, `T4` falls to `mem_efficient`).
+
+**1. Prepare shards (5L docs ~517M tokens, 6 shards):**
+```bash
+uv run python -m src.attention_benchmark.dataset.prepare_dataset --split sample-10BT --max-docs 500000 --num-workers 8
+# creates ./data/shard_*.bin (~191M each); split into train/val if needed:
+# !mv ./data/shard_00004_train_tokens.bin ./data/shard_00000_val_tokens.bin
+```
+
+**2. Create / verify curriculum config:**
+```yaml
+# configs/model_flash_gqa.yaml or debug copy
+model: {n_layer: 6, n_embd: 512, n_head: 8, n_kv_head: 2, block_size: 8192}
+training: {batch_size_tokens: 8192}  # 8192/seq_len seqs: 2k=4, 4k=2, 8k=1
+curriculum: {stages: [{seq_len: 2048}, {seq_len: 4096}, {seq_len: 8192}]}
+tokens_per_stage: [300000000, 300000000, 300000000]  # 1 epoch/stage for 3 shards 300M (400M if 4 shards)
+```
+Debug helper:
+```bash
+python -c "import pathlib,yaml; p=pathlib.Path('configs/model_flash_gqa.yaml'); y=yaml.safe_load(p.read_text()); y['model'].update(n_layer=6,n_embd=512,n_head=8,n_kv_head=2,block_size=8192); y['training']['batch_size_tokens']=8192; y['curriculum']['stages']=[{'seq_len':2048},{'seq_len':4096},{'seq_len':8192}]; y['tokens_per_stage']=[300000000,300000000,300000000]; y['logging']['checkpoint_dir']='runs/flash_gqa_3ep'; pathlib.Path('configs/model_flash_gqa_3ep.yaml').write_text(yaml.dump(y))"
+```
+
+**3. Run 3-epoch curriculum (1 epoch per stage, ~7.3hr on 2×T4 `3×300M 109k steps`, `3×400M 146k steps`):**
+```bash
+# single-GPU
+TOKENS_PER_STAGE=300000000,300000000,300000000 uv run python -m src.attention_benchmark.training.train --config configs/model_flash_gqa_3ep.yaml
+# DDP 2×T4 (recommended)
+TOKENS_PER_STAGE=300000000,300000000,300000000 uv run torchrun --nproc_per_node=2 -m src.attention_benchmark.training.train --config configs/model_flash_gqa_3ep.yaml
+# tweak budget via CLI without editing yaml:
+# uv run torchrun --nproc_per_node=2 -m src.attention_benchmark.training.train --config configs/model_flash_gqa.yaml --tokens-per-stage 300000000,300000000,300000000
+```
+Same for NSA: `configs/model_nsa_gqa_3ep.yaml` (`attention_type: nsa_gqa`, same `stages`).
+
+**4. Short ablations:**
+- `1 epoch 1024 single stage 300M 2.4hr`: `curriculum.stages=[{seq_len:1024}] tokens_per_stage=[300000000]`
+- `Chinchilla 50M optimal 1B (~3.3 epochs) 7-8hr`: `tokens_per_stage=[1000000000]` or `[300M,300M,400M]`
+
+Warnings `wrapt`/`OMP_NUM_THREADS`/`socket.cpp`/`broadcast_buffers`/`max_autotune_gemm` are now suppressed (`pyproject.toml:14 wrapt`, `train.py:34 OMP/TORCHINDUCTOR`, `ddp_utils.py:12 FutureWarning`); `flash` uses explicit `sdpa_kernel([FLASH,EFFICIENT])` so `T4 mem_efficient` is intentional.
+
 ### Generate Comparison Report
 After both runs complete:
 ```bash
@@ -118,7 +160,8 @@ Generates `comparison_report.html` with side-by-side loss curves, throughput, pe
 ├── .env.example                     # Environment variable template
 ├── .gitignore
 ├── configs/
-│   ├── model_flash_gqa.yaml         # 124M, Kronecker + Flash + GQA
+│   ├── model_flash_gqa.yaml         # 124M full (145.6M with LM head 38.6M)
+│   ├── model_flash_gqa_debug.yaml   # 50.6M debug (2.09M Embed + 22.8M Blocks + 25.7M LM Head)
 │   └── model_nsa_gqa.yaml           # 124M, Kronecker + NSA + GQA
 ├── src/
 │   └── attention_benchmark/
@@ -154,14 +197,14 @@ Generates `comparison_report.html` with side-by-side loss curves, throughput, pe
 
 ### Key Components
 
-- **Kronecker Embeddings**: Byte-level codec input embedding (input-side only), reducing embedding params from ~38.6M → ~3.1M.
-- **Flash Attention + GQA**: PyTorch native SDPA with GQA support (PyTorch ≥2.5), runs on CPU/MPS/CUDA.
+- **Kronecker Embeddings**: Byte-level codec input embedding (input-side only), Full `38.6M` LM Head + `3.1M` Embed vs Debug `25.7M` + `2.09M` (Blocks `103.8M`→`22.8M`).
+- **Flash Attention + GQA**: PyTorch native SDPA `enable_gqa=True` `src/attention_benchmark/attention/gqa_flash_attention.py:135` with explicit `sdpa_kernel([FLASH,EFFICIENT,MATH])` — `T4` `mem_efficient` fallback, `torch 2.5+`.
 - **Native Sparse Attention + GQA**: Triton-based sparse attention (requires CUDA), gated compression + sliding-window fusion.
 - **Grouped Query Attention**: Single query head count / multiple KV head counts, natively expressed as different head dimensions.
 - **Parallel Dataset Preparation**: Multiprocessing tokenization with `prepare_dataset.py` (3-5× faster, tiktoken default per-worker cached), baseline capped at 200k docs (2L, ~150M tokens) via `--max-docs`; slice at load time to avoid full download.
 - **FineWeb-Edu Shards**: GPT-2 BPE (tiktoken byte-identical by default, optional HF fast Rust), split across uint16 `.bin` files (~100M tokens/shard), uploaded to HF Hub for reproducibility. Full `sample-10BT` = ~10B tokens (~14M docs); baseline = 200k docs (~2-3 shards). HF auth removed for now — sharding local-only, upload later.
 - **Staged Curriculum**: Train at 2k context first, then 4k, then 8k — same shards reused at each stage.
-- **Metrics Logging**: JSONL format (step, stage, loss, ppl, tokens/sec, lr, grad_norm, GPU mem, epochs_completed).
+- **Metrics Logging**: JSONL `src/attention_benchmark/training/metrics.py:17` `TrainMetrics` `(step, stage, seq_len, loss, ppl, lr, grad_norm, tokens_seen, tokens_per_sec, gpu_mem_gb, epochs_completed, wall_clock_s)` every `500` steps, plus `EvalMetrics`.
 
 ## Metrics & Reporting
 
